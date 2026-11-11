@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Система оценивания студентов</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .card { background: #fff; border-radius: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06); }
+  .btn { border-radius: 10px; padding: .6rem 1.1rem; font-weight: 600; transition: all .15s; cursor:pointer; border:none; }
+  .btn-primary { background:#4f46e5; color:#fff; }
+  .btn-primary:hover { background:#4338ca; }
+  .btn-secondary { background:#f1f5f9; color:#334155; }
+  .btn-secondary:hover { background:#e2e8f0; }
+  .btn-danger { background:#fee2e2; color:#b91c1c; }
+  .btn-danger:hover { background:#fecaca; }
+  .input { border:1px solid #e2e8f0; border-radius:10px; padding:.55rem .8rem; width:100%; }
+  .input:focus { outline:2px solid #4f46e5; outline-offset:-1px; border-color:#4f46e5; }
+  .opt-row { border:1px solid #e2e8f0; border-radius:10px; padding:.6rem .8rem; cursor:pointer; }
+  .opt-row.selected { border-color:#4f46e5; background:#eef2ff; }
+  .fade-in { animation: fadeIn .2s ease; }
+  @keyframes fadeIn { from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);} }
+  ::-webkit-scrollbar { width:8px; } ::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:4px; }
+</style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800">
+
+<div id="banner" class="hidden text-xs text-center py-1.5 bg-amber-100 text-amber-800"></div>
+
+<div id="app" class="max-w-5xl mx-auto px-4 py-6"></div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
+  import {
+    getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, where
+  } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBrfQXURfRrRxqXGtjRGhGPa2MogDyW3lY",
+    authDomain: "student-evaluation-site-ef076.firebaseapp.com",
+    projectId: "student-evaluation-site-ef076",
+    storageBucket: "student-evaluation-site-ef076.firebasestorage.app",
+    messagingSenderId: "860317811578",
+    appId: "1:860317811578:web:a66d64e15f797761904cc3"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  window.__fb = { db, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, where };
+
+  window.__fbReady = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('auth-timeout')), 10000);
+    onAuthStateChanged(auth, (user) => {
+      if (user) { clearTimeout(timer); resolve(user); }
+    });
+    signInAnonymously(auth).catch((err) => { clearTimeout(timer); reject(err); });
+  });
+</script>
+
+<script>
+/* ======================= STORAGE LAYER ======================= */
+const Store = {
+  mode: 'local',
+
+  async init() {
+    try {
+      await window.__fbReady;
+      this.mode = 'db';
+    } catch (e) {
+      console.error('Firebase init failed, falling back to local storage:', e);
+    }
+    if (this.mode === 'local') showBanner('Не удалось подключиться к общей базе данных — данные сохраняются только в этом браузере.');
+  },
+
+  _localGet(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (e) { return fallback; }
+  },
+  _localSet(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {} },
+
+  uid() { return 'id-' + Math.random().toString(36).slice(2, 11) + Date.now().toString(36); },
+
+  async listTests() {
+    if (this.mode === 'db') {
+      const { db, collection, getDocs } = window.__fb;
+      const snap = await getDocs(collection(db, 'tests'));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    }
+    return this._localGet('es_tests', []);
+  },
+
+  async saveTest(test) {
+    const id = test.id || this.uid();
+    const data = { ...test, id, updatedAt: Date.now() };
+    delete data._isNew;
+    if (this.mode === 'db') {
+      const { db, doc, setDoc } = window.__fb;
+      await setDoc(doc(db, 'tests', id), data);
+    } else {
+      const all = this._localGet('es_tests', []);
+      const idx = all.findIndex(t => t.id === id);
+      if (idx >= 0) all[idx] = data; else all.push(data);
+      this._localSet('es_tests', all);
+    }
+    return id;
+  },
+
+  async deleteTest(id) {
+    if (this.mode === 'db') {
+      const { db, doc, deleteDoc } = window.__fb;
+      await deleteDoc(doc(db, 'tests', id));
+    } else {
+      this._localSet('es_tests', this._localGet('es_tests', []).filter(t => t.id !== id));
+    }
+  },
+
+  async listResults(testId) {
+    if (this.mode === 'db') {
+      const { db, collection, query, where, getDocs } = window.__fb;
+      const q = query(collection(db, 'results'), where('testId', '==', testId));
+      const snap = await getDocs(q);
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    }
+    return this._localGet('es_results', []).filter(r => r.testId === testId);
+  },
+
+  async addResult(result) {
+    const id = this.uid();
+    const data = { ...result, id, submittedAt: Date.now() };
+    if (this.mode === 'db') {
+      const { db, doc, setDoc } = window.__fb;
+      await setDoc(doc(db, 'results', id), data);
+    } else {
+      const all = this._localGet('es_results', []);
+      all.push(data);
+      this._localSet('es_results', all);
+    }
+    return id;
+  },
+
+  async getConfig() {
+    if (this.mode === 'db') {
+      const { db, doc, getDoc } = window.__fb;
+      const snap = await getDoc(doc(db, 'config', 'admin'));
+      return snap.exists() ? snap.data() : null;
+    }
+    return this._localGet('es_config', null);
+  },
+
+  async setConfig(cfg) {
+    if (this.mode === 'db') {
+      const { db, doc, setDoc } = window.__fb;
+      await setDoc(doc(db, 'config', 'admin'), cfg);
+    } else {
+      this._localSet('es_config', cfg);
+    }
+  }
+};
+
+function showBanner(text) {
+  const b = document.getElementById('banner');
+  b.textContent = text;
+  b.classList.remove('hidden');
+}
+
+/* ======================= APP STATE / ROUTER ======================= */
+const App = document.getElementById('app');
+let view = 'home';
+let state = {
+  student: JSON.parse(localStorage.getItem('es_student') || 'null'),
+  teacherUnlocked: false,
+  currentTest: null,
+  currentAttempt: null, // { test, answers: [] }
+  editingTest: null,
+  resultsFor: null,
+};
+
+function setView(v, extra) { view = v; Object.assign(state, extra || {}); render(); }
+
+function esc(s) { return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+/* ======================= RENDER ======================= */
+async function render() {
+  App.innerHTML = `<div class="text-center text-slate-400 py-20">Загрузка…</div>`;
+  let html = '';
+  if (view === 'home') html = renderHome();
+  else if (view === 'student-login') html = renderStudentLogin();
+  else if (view === 'student-tests') html = await renderStudentTests();
+  else if (view === 'student-attempt') html = renderStudentAttempt();
+  else if (view === 'student-result') html = renderStudentResult();
+  else if (view === 'teacher-pin') html = await renderTeacherPin();
+  else if (view === 'teacher-dashboard') html = await renderTeacherDashboard();
+  else if (view === 'teacher-edit-test') html = renderTeacherEditTest();
+  else if (view === 'teacher-results') html = await renderTeacherResults();
+  App.innerHTML = html;
+}
+
+function header(title, backView) {
+  return `
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        ${backView ? `<button onclick="setView('${backView}')" class="btn btn-secondary">← Назад</button>` : ''}
+        <h1 class="text-xl font-bold">${esc(title)}</h1>
+      </div>
+      <button onclick="setView('home')" class="text-sm text-slate-400 hover:text-slate-600">На главную</button>
+    </div>`;
+}
+
+function renderHome() {
+  return `
+    <div class="fade-in text-center py-10">
+      <h1 class="text-3xl font-bold mb-2">Система оценивания студентов</h1>
+      <p class="text-slate-500 mb-10">Тесты с автоматической проверкой для бакалавриата</p>
+      <div class="grid sm:grid-cols-2 gap-6 max-w-2xl mx-auto">
+        <div class="card p-8 cursor-pointer hover:shadow-md" onclick="setView('student-login')">
+          <div class="text-4xl mb-3">🎓</div>
+          <div class="text-lg font-semibold mb-1">Я студент</div>
+          <div class="text-sm text-slate-500">Пройти доступный тест и сразу получить результат</div>
+        </div>
+        <div class="card p-8 cursor-pointer hover:shadow-md" onclick="setView('teacher-pin')">
+          <div class="text-4xl mb-3">🧑‍🏫</div>
+          <div class="text-lg font-semibold mb-1">Я преподаватель</div>
+          <div class="text-sm text-slate-500">Создавать тесты и смотреть результаты студентов</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/* ---------- STUDENT ---------- */
+function renderStudentLogin() {
+  const s = state.student || { name: '', group: '' };
+  return `
+    ${header('Вход студента', 'home')}
+    <div class="card p-6 max-w-md mx-auto fade-in">
+      <label class="text-sm font-medium block mb-1">ФИО</label>
+      <input id="s-name" class="input mb-4" placeholder="Иванов Иван" value="${esc(s.name)}">
+      <label class="text-sm font-medium block mb-1">Группа</label>
+      <input id="s-group" class="input mb-5" placeholder="Например, 21-ФЛ" value="${esc(s.group)}">
+      <button class="btn btn-primary w-full" onclick="studentLoginSubmit()">Продолжить</button>
+    </div>`;
+}
+
+function studentLoginSubmit() {
+  const name = document.getElementById('s-name').value.trim();
+  const group = document.getElementById('s-group').value.trim();
+  if (!name) { alert('Введите ФИО'); return; }
+  state.student = { name, group };
+  localStorage.setItem('es_student', JSON.stringify(state.student));
+  setView('student-tests');
+}
+
+async function renderStudentTests() {
+  const tests = (await Store.listTests()).filter(t => t.active);
+  const cards = tests.length ? tests.map(t => `
+    <div class="card p-5 flex items-center justify-between">
+      <div>
+        <div class="font-semibold">${esc(t.title)}</div>
+        <div class="text-sm text-slate-500">${esc(t.subject || '')} · ${t.questions.length} вопросов${t.timeLimitMin ? ' · ' + t.timeLimitMin + ' мин' : ''}</div>
+      </div>
+      <button class="btn btn-primary" onclick='startAttempt(${JSON.stringify(t.id)})'>Начать</button>
+    </div>`).join('') : `<div class="text-center text-slate-400 py-16">Пока нет доступных тестов</div>`;
+  return `
+    ${header('Доступные тесты', 'home')}
+    <div class="text-sm text-slate-500 mb-4">Студент: <b>${esc(state.student.name)}</b>${state.student.group ? ', группа ' + esc(state.student.group) : ''} · <button class="text-indigo-600 underline" onclick="setView('student-login')">изменить</button></div>
+    <div class="space-y-3">${cards}</div>`;
+}
+
+async function startAttempt(testId) {
+  const tests = await Store.listTests();
+  const test = tests.find(t => t.id === testId);
+  if (!test) { alert('Тест не найден'); return; }
+  state.currentAttempt = { test, answers: new Array(test.questions.length).fill(null), startedAt: Date.now() };
+  setView('student-attempt');
+}
+
+function renderStudentAttempt() {
+  const { test, answers } = state.currentAttempt;
+  const qs = test.questions.map((q, qi) => `
+    <div class="card p-5">
+      <div class="font-medium mb-3">${qi + 1}. ${esc(q.text)}</div>
+      <div class="space-y-2">
+        ${q.options.map((opt, oi) => `
+          <div class="opt-row ${answers[qi] === oi ? 'selected' : ''}" onclick="selectAnswer(${qi},${oi})">
+            ${esc(opt)}
+          </div>`).join('')}
+      </div>
+    </div>`).join('');
+  const answered = answers.filter(a => a !== null).length;
+  return `
+    ${header(test.title, null)}
+    <div class="text-sm text-slate-500 mb-4">Отвечено: ${answered} / ${test.questions.length}</div>
+    <div class="space-y-4 mb-6">${qs}</div>
+    <button class="btn btn-primary w-full" onclick="submitAttempt()">Завершить и отправить</button>`;
+}
+
+function selectAnswer(qi, oi) {
+  state.currentAttempt.answers[qi] = oi;
+  render();
+}
+
+async function submitAttempt() {
+  const { test, answers } = state.currentAttempt;
+  const unanswered = answers.some(a => a === null);
+  if (unanswered && !confirm('Есть вопросы без ответа. Отправить тест всё равно?')) return;
+  let correct = 0;
+  test.questions.forEach((q, qi) => { if (answers[qi] === q.correctIndex) correct++; });
+  const total = test.questions.length;
+  const percent = Math.round((correct / total) * 100);
+  const result = {
+    testId: test.id, testTitle: test.title,
+    studentName: state.student.name, studentGroup: state.student.group,
+    correct, total, percent, answers
+  };
+  await Store.addResult(result);
+  state.currentAttempt = { ...state.currentAttempt, result };
+  setView('student-result');
+}
+
+function renderStudentResult() {
+  const { test, answers, result } = state.currentAttempt;
+  const rows = test.questions.map((q, qi) => {
+    const ok = answers[qi] === q.correctIndex;
+    return `<div class="flex items-start gap-2 text-sm py-1.5 border-b border-slate-100">
+      <span class="${ok ? 'text-emerald-600' : 'text-rose-600'}">${ok ? '✓' : '✗'}</span>
+      <span>${qi + 1}. ${esc(q.text)}</span>
+    </div>`;
+  }).join('');
+  const color = result.percent >= 60 ? 'text-emerald-600' : 'text-rose-600';
+  return `
+    ${header('Результат', null)}
+    <div class="card p-8 text-center max-w-md mx-auto mb-6">
+      <div class="text-5xl font-bold ${color} mb-2">${result.percent}%</div>
+      <div class="text-slate-500 mb-4">Правильных ответов: ${result.correct} из ${result.total}</div>
+      <button class="btn btn-secondary" onclick="setView('student-tests')">К списку тестов</button>
+    </div>
+    <div class="card p-5 max-w-md mx-auto">${rows}</div>`;
+}
+
+/* ---------- TEACHER ---------- */
+async function renderTeacherPin() {
+  const cfg = await Store.getConfig();
+  if (!cfg || !cfg.pin) {
+    return `
+      ${header('Установка PIN-кода', 'home')}
+      <div class="card p-6 max-w-md mx-auto fade-in">
+        <p class="text-sm text-slate-500 mb-4">PIN ещё не задан. Придумайте код доступа для преподавателя (это не аккаунт, просто простой код против случайного входа).</p>
+        <input id="pin-new" class="input mb-4" placeholder="Например, 2580" inputmode="numeric">
+        <button class="btn btn-primary w-full" onclick="setTeacherPin()">Сохранить и войти</button>
+      </div>`;
+  }
+  return `
+    ${header('Вход преподавателя', 'home')}
+    <div class="card p-6 max-w-md mx-auto fade-in">
+      <input id="pin-enter" type="password" class="input mb-4" placeholder="Введите PIN" inputmode="numeric">
+      <button class="btn btn-primary w-full" onclick="checkTeacherPin()">Войти</button>
+    </div>`;
+}
+
+async function setTeacherPin() {
+  const pin = document.getElementById('pin-new').value.trim();
+  if (!pin) { alert('Введите PIN'); return; }
+  await Store.setConfig({ pin });
+  state.teacherUnlocked = true;
+  setView('teacher-dashboard');
+}
+
+async function checkTeacherPin() {
+  const pin = document.getElementById('pin-enter').value.trim();
+  const cfg = await Store.getConfig();
+  if (cfg && cfg.pin === pin) { state.teacherUnlocked = true; setView('teacher-dashboard'); }
+  else alert('Неверный PIN');
+}
+
+async function renderTeacherDashboard() {
+  if (!state.teacherUnlocked) { setView('teacher-pin'); return ''; }
+  const tests = await Store.listTests();
+  const rows = tests.length ? tests.map(t => `
+    <div class="card p-4 flex items-center justify-between">
+      <div>
+        <div class="font-semibold">${esc(t.title)} ${t.active ? '<span class="text-xs text-emerald-600 font-normal">● активен</span>' : '<span class="text-xs text-slate-400 font-normal">○ скрыт</span>'}</div>
+        <div class="text-sm text-slate-500">${esc(t.subject || '')} · ${t.questions.length} вопросов</div>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn btn-secondary" onclick='openResults(${JSON.stringify(t.id)})'>Результаты</button>
+        <button class="btn btn-secondary" onclick='editTest(${JSON.stringify(t.id)})'>Изменить</button>
+        <button class="btn btn-danger" onclick='removeTest(${JSON.stringify(t.id)})'>Удалить</button>
+      </div>
+    </div>`).join('') : `<div class="text-center text-slate-400 py-16">Тестов пока нет — создайте первый</div>`;
+  return `
+    ${header('Панель преподавателя', 'home')}
+    <div class="flex justify-end mb-4">
+      <button class="btn btn-primary" onclick="newTest()">+ Новый тест</button>
+    </div>
+    <div class="space-y-3">${rows}</div>`;
+}
+
+function newTest() {
+  state.editingTest = { id: null, title: '', subject: '', timeLimitMin: 0, active: true, questions: [{ text: '', options: ['', ''], correctIndex: 0 }] };
+  setView('teacher-edit-test');
+}
+
+async function editTest(id) {
+  const tests = await Store.listTests();
+  state.editingTest = JSON.parse(JSON.stringify(tests.find(t => t.id === id)));
+  setView('teacher-edit-test');
+}
+
+async function removeTest(id) {
+  if (!confirm('Удалить тест и невозможность отмены?')) return;
+  await Store.deleteTest(id);
+  render();
+}
+
+function renderTeacherEditTest() {
+  const t = state.editingTest;
+  const qBlocks = t.questions.map((q, qi) => `
+    <div class="card p-4 mb-3">
+      <div class="flex justify-between items-start mb-2">
+        <div class="text-sm font-medium text-slate-500">Вопрос ${qi + 1}</div>
+        ${t.questions.length > 1 ? `<button class="text-rose-500 text-sm" onclick="removeQuestion(${qi})">Удалить вопрос</button>` : ''}
+      </div>
+      <input class="input mb-2" placeholder="Текст вопроса" value="${esc(q.text)}" oninput="updateQText(${qi}, this.value)">
+      <div class="space-y-2">
+        ${q.options.map((opt, oi) => `
+          <div class="flex items-center gap-2">
+            <input type="radio" name="correct-${qi}" ${q.correctIndex === oi ? 'checked' : ''} onchange="setCorrect(${qi},${oi})">
+            <input class="input" placeholder="Вариант ${oi + 1}" value="${esc(opt)}" oninput="updateOption(${qi},${oi}, this.value)">
+            ${q.options.length > 2 ? `<button class="text-rose-400 px-2" onclick="removeOption(${qi},${oi})">✕</button>` : ''}
+          </div>`).join('')}
+      </div>
+      <button class="text-indigo-600 text-sm mt-2" onclick="addOption(${qi})">+ Добавить вариант</button>
+    </div>`).join('');
+
+  return `
+    ${header(t.id ? 'Редактирование теста' : 'Новый тест', 'teacher-dashboard')}
+    <div class="card p-5 mb-4">
+      <label class="text-sm font-medium block mb-1">Название теста</label>
+      <input class="input mb-3" value="${esc(t.title)}" oninput="updateTestField('title', this.value)">
+      <label class="text-sm font-medium block mb-1">Предмет</label>
+      <input class="input mb-3" value="${esc(t.subject)}" oninput="updateTestField('subject', this.value)">
+      <label class="text-sm font-medium block mb-1">Лимит времени (мин, 0 = без лимита)</label>
+      <input type="number" min="0" class="input mb-3" value="${t.timeLimitMin}" oninput="updateTestField('timeLimitMin', parseInt(this.value)||0)">
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" ${t.active ? 'checked' : ''} onchange="updateTestField('active', this.checked)"> Тест доступен студентам
+      </label>
+    </div>
+    <h3 class="font-semibold mb-2">Вопросы</h3>
+    ${qBlocks}
+    <button class="btn btn-secondary mb-5" onclick="addQuestion()">+ Добавить вопрос</button>
+    <div class="flex gap-3">
+      <button class="btn btn-primary flex-1" onclick="saveTestNow()">Сохранить тест</button>
+      <button class="btn btn-secondary" onclick="setView('teacher-dashboard')">Отмена</button>
+    </div>`;
+}
+
+function updateTestField(field, value) { state.editingTest[field] = value; render(); }
+function updateQText(qi, val) { state.editingTest.questions[qi].text = val; }
+function updateOption(qi, oi, val) { state.editingTest.questions[qi].options[oi] = val; }
+function setCorrect(qi, oi) { state.editingTest.questions[qi].correctIndex = oi; render(); }
+function addOption(qi) { state.editingTest.questions[qi].options.push(''); render(); }
+function removeOption(qi, oi) {
+  const q = state.editingTest.questions[qi];
+  q.options.splice(oi, 1);
+  if (q.correctIndex >= q.options.length) q.correctIndex = 0;
+  render();
+}
+function addQuestion() { state.editingTest.questions.push({ text: '', options: ['', ''], correctIndex: 0 }); render(); }
+function removeQuestion(qi) { state.editingTest.questions.splice(qi, 1); render(); }
+
+async function saveTestNow() {
+  const t = state.editingTest;
+  if (!t.title.trim()) { alert('Введите название теста'); return; }
+  for (const q of t.questions) {
+    if (!q.text.trim()) { alert('Заполните текст всех вопросов'); return; }
+    if (q.options.some(o => !o.trim())) { alert('Заполните все варианты ответов'); return; }
+  }
+  await Store.saveTest(t);
+  setView('teacher-dashboard');
+}
+
+async function openResults(testId) {
+  state.resultsFor = testId;
+  setView('teacher-results');
+}
+
+async function renderTeacherResults() {
+  const tests = await Store.listTests();
+  const test = tests.find(t => t.id === state.resultsFor);
+  const results = (await Store.listResults(state.resultsFor)).sort((a, b) => b.submittedAt - a.submittedAt);
+  const avg = results.length ? Math.round(results.reduce((s, r) => s + r.percent, 0) / results.length) : 0;
+  const rows = results.length ? results.map(r => `
+    <tr class="border-b border-slate-100">
+      <td class="py-2 px-3">${esc(r.studentName)}</td>
+      <td class="py-2 px-3 text-slate-500">${esc(r.studentGroup || '—')}</td>
+      <td class="py-2 px-3">${r.correct}/${r.total}</td>
+      <td class="py-2 px-3 font-semibold ${r.percent >= 60 ? 'text-emerald-600' : 'text-rose-600'}">${r.percent}%</td>
+      <td class="py-2 px-3 text-slate-400">${new Date(r.submittedAt).toLocaleString('ru-RU')}</td>
+    </tr>`).join('') : `<tr><td colspan="5" class="text-center text-slate-400 py-10">Пока нет попыток</td></tr>`;
+  return `
+    ${header('Результаты: ' + (test ? test.title : ''), 'teacher-dashboard')}
+    <div class="flex gap-6 mb-4 text-sm">
+      <div>Попыток: <b>${results.length}</b></div>
+      <div>Средний балл: <b>${avg}%</b></div>
+    </div>
+    <div class="card p-2 overflow-auto">
+      <table class="w-full text-sm">
+        <thead><tr class="text-left text-slate-400 border-b border-slate-200">
+          <th class="py-2 px-3">Студент</th><th class="py-2 px-3">Группа</th><th class="py-2 px-3">Баллы</th><th class="py-2 px-3">%</th><th class="py-2 px-3">Когда</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+/* ======================= BOOT ======================= */
+// The Firebase module script below is deferred and may not have run yet
+// when this classic script executes, so wait until window.__fbReady exists
+// (as a Promise reference) before calling Store.init(), which awaits it.
+(function waitForFirebase() {
+  if (window.__fbReady) { Store.init().then(render); return; }
+  setTimeout(waitForFirebase, 20);
+})();
+</script>
+</body>
+</html>
